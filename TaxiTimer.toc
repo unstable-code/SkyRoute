@@ -1,0 +1,14 @@
+## Interface: 20506
+## Title: TaxiTimer
+## Notes: 비행 경로별 소요 시간을 기록하고, 비행 중 남은 시간과 경유지 진행도를 표시합니다.
+## Author: unstable-code
+## Version: 1.0.0
+## X-License: MIT
+## X-Website: https://gitlab.gggames.synology.me/gamemods/world-of-warcraft/addons/taxitimer
+## SavedVariables: TaxiTimerDB
+
+Core.lua
+Taxi.lua
+Flight.lua
+Display.lua
+Commands.lua
