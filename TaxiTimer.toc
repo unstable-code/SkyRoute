@@ -4,7 +4,7 @@
 ## Author: unstable-code
 ## Version: @project-version@
 ## X-License: MIT
-## X-Website: https://gitlab.gggames.synology.me/gamemods/world-of-warcraft/addons/taxitimer
+## X-Website: https://github.com/unstable-code/TaxiTimer
 ## SavedVariables: TaxiTimerDB
 
 Core.lua

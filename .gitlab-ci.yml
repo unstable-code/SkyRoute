@@ -14,3 +14,5 @@ lint-my-addon:
 
 release-my-addon:
   extends: .wow_release_template
+  variables:
+    GITHUB_REPO: "unstable-code/TaxiTimer"
