@@ -1,4 +1,4 @@
-## Interface: 20506
+## Interface: 11509, 20506, 16001
 ## Title: TaxiTimer
 ## Notes: 비행 경로별 소요 시간을 기록하고, 비행 중 남은 시간과 경유지 진행도를 표시합니다.
 ## Author: unstable-code
