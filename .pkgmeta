@@ -1,0 +1,6 @@
+package-as: TaxiTimer
+
+ignore:
+  - .gitlab-ci.yml
+  - .luacheckrc
+  - .pkgmeta

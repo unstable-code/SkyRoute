@@ -1,11 +1,16 @@
 stages:
   - validate
+  - release
 
 include:
   - project: 'gamemods/world-of-warcraft/addons/gitlab-profile'
-    file: '/wow-lua-validate.yml'
+    file:
+      - '/wow-lua-validate.yml'
+      - '/wow-release.yml'
 
 # WoW 전용 템플릿 상속
 lint-my-addon:
   extends: .wow_lint_template
 
+release-my-addon:
+  extends: .wow_release_template
