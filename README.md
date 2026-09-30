@@ -1,6 +1,6 @@
-# TaxiTimer
+# SkyRoute
 
-<img src="media/logo.svg" alt="TaxiTimer 로고" width="128" align="right">
+<img src="media/logo.svg" alt="SkyRoute 로고" width="128" align="right">
 
 World of Warcraft 클래식 계열 클라이언트용 비행 타이머 애드온. 클래식(Classic Era), 불타는 성전 기념판(Anniversary), 클래식 포에버(베타)를 지원합니다.
 
@@ -18,7 +18,7 @@ World of Warcraft 클래식 계열 클라이언트용 비행 타이머 애드온
 
 ## 명령어
 
-`/taxitimer` 또는 `/taxi`
+`/skyroute` 또는 `/skr`
 
 | 명령 | 설명 |
 |---|---|

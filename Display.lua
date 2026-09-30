@@ -1,4 +1,4 @@
--- TaxiTimer: 화면 표시 (타이머 창, 타이머 창 툴팁, 비행 지도 노드 툴팁)
+-- SkyRoute: 화면 표시 (타이머 창, 타이머 창 툴팁, 비행 지도 노드 툴팁)
 
 local _, ns = ...
 
@@ -125,11 +125,11 @@ local function fillTooltip()
     local f = ns.GetFlight()
 
     GameTooltip:ClearLines()
-    GameTooltip:AddLine("TaxiTimer")
+    GameTooltip:AddLine("SkyRoute")
 
     if not f or f.state ~= "flying" then
         GameTooltip:AddLine("드래그해서 위치를 옮길 수 있습니다.", 1, 1, 1)
-        GameTooltip:AddLine("/taxitimer hide 로 숨깁니다.", DIM_R, DIM_G, DIM_B)
+        GameTooltip:AddLine("/skyroute hide 로 숨깁니다.", DIM_R, DIM_G, DIM_B)
         GameTooltip:Show()
         return
     end

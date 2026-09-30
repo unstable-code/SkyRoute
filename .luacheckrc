@@ -3,9 +3,9 @@ max_line_length = false
 
 globals = {
     -- 저장 데이터
-    "TaxiTimerDB",
+    "SkyRouteDB",
     -- 슬래시 명령 등록
-    "SLASH_TAXITIMER1", "SLASH_TAXITIMER2", "SlashCmdList",
+    "SLASH_SKYROUTE1", "SLASH_SKYROUTE2", "SlashCmdList",
 }
 
 read_globals = {

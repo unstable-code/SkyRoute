@@ -1,4 +1,4 @@
--- TaxiTimer: 비행 추적
+-- SkyRoute: 비행 추적
 --
 -- 상태 흐름: (없음) → pending → flying → (없음)
 --   pending: 비행 지도에서 목적지를 골랐지만 아직 이륙하지 않음

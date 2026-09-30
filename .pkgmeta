@@ -1,4 +1,4 @@
-package-as: TaxiTimer
+package-as: SkyRoute
 
 ignore:
   - .gitlab-ci.yml

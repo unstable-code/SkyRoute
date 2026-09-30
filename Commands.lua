@@ -1,4 +1,4 @@
--- TaxiTimer: 슬래시 명령
+-- SkyRoute: 슬래시 명령
 
 local _, ns = ...
 
@@ -43,16 +43,16 @@ command("debug", "디버그 출력을 켜고 끕니다.", function()
 end)
 
 command("help", "이 도움말을 표시합니다.", function()
-    ns.Print("명령어 (/taxitimer 또는 /taxi):", true)
+    ns.Print("명령어 (/skyroute 또는 /skr):", true)
     for _, entry in ipairs(order) do
         ns.Print(format("  %s – %s", ns.Em(entry.name), entry.usage), true)
     end
 end)
 
-SLASH_TAXITIMER1 = "/taxitimer"
-SLASH_TAXITIMER2 = "/taxi"
+SLASH_SKYROUTE1 = "/skyroute"
+SLASH_SKYROUTE2 = "/skr"
 
-SlashCmdList.TAXITIMER = function(input)
+SlashCmdList.SKYROUTE = function(input)
     local name = strlower(strtrim(input or ""))
     local handler = commands[name]
 

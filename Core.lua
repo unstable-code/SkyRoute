@@ -1,4 +1,4 @@
--- TaxiTimer: 공용 기반 (이벤트 디스패치, 저장 데이터, 출력, 문자열 헬퍼)
+-- SkyRoute: 공용 기반 (이벤트 디스패치, 저장 데이터, 출력, 문자열 헬퍼)
 
 local ADDON, ns = ...
 
@@ -48,9 +48,9 @@ end
 ns.On("ADDON_LOADED", function(name)
     if name ~= ADDON then return end
 
-    TaxiTimerDB = TaxiTimerDB or {}
-    fillDefaults(TaxiTimerDB, DEFAULTS)
-    ns.db = TaxiTimerDB
+    SkyRouteDB = SkyRouteDB or {}
+    fillDefaults(SkyRouteDB, DEFAULTS)
+    ns.db = SkyRouteDB
 end)
 
 
@@ -71,7 +71,7 @@ end
 
 --[[ 출력 ]]
 
-local PREFIX = "|cff4fc3f7TaxiTimer|r "
+local PREFIX = "|cff4fc3f7SkyRoute|r "
 
 -- force: 채팅 출력을 꺼 두었어도 표시 (명령 응답 등)
 function ns.Print(message, force)
