@@ -4,6 +4,7 @@
 ## Author: unstable-code
 ## Version: @project-version@
 ## X-License: MIT
+## X-Curse-Project-ID: 1719386
 ## X-Website: https://github.com/unstable-code/SkyRoute
 ## SavedVariables: SkyRouteDB
 
