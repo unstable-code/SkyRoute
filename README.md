@@ -1,5 +1,7 @@
 # TaxiTimer
 
+<img src="media/logo.svg" alt="TaxiTimer 로고" width="128" align="right">
+
 World of Warcraft 불타는 성전 클래식(Anniversary) 용 비행 타이머 애드온.
 
 비행 경로마다 실제로 걸린 시간을 기록해 두었다가, 다음에 같은 경로를 탈 때 남은 시간과 지나고 있는 경유지를 보여 줍니다.

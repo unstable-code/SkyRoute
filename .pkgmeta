@@ -4,3 +4,4 @@ ignore:
   - .gitlab-ci.yml
   - .luacheckrc
   - .pkgmeta
+  - media
