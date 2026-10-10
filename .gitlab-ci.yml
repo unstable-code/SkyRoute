@@ -12,6 +12,17 @@ include:
 lint-my-addon:
   extends: .wow_lint_template
 
+# 게임 밖에서 가짜 WoW 환경으로 단위·시나리오·퍼즈 테스트 (실패하면 release 스테이지도 막힘)
+#   실측 데이터 테스트(tests/realdata_spec.lua)는 SKR_DATA 가 없어 건너뛴다.
+test:
+  stage: validate
+  image: "alpine:latest"
+  before_script:
+    - apk add --no-cache lua5.1 lua5.1-dev luarocks5.1 build-base
+    - luarocks-5.1 install busted
+  script:
+    - busted --output=utfTerminal
+
 release-my-addon:
   extends: .wow_release_template
   variables:
