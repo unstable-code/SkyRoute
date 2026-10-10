@@ -22,3 +22,10 @@ read_globals = {
     "GetNumRoutes", "TaxiGetNodeSlot", "TakeTaxiNode", "TaxiRequestEarlyLanding",
     "TaxiNodeOnButtonEnter", "AcceptBattlefieldPort",
 }
+
+-- 테스트는 게임 밖 일반 Lua 5.1 + busted 로 실행
+files["tests/"] = {
+    std = "lua51+busted",
+    globals = {},
+    read_globals = {},
+}

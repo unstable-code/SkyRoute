@@ -5,3 +5,5 @@ ignore:
   - .luacheckrc
   - .pkgmeta
   - media
+  - tests
+  - .busted
