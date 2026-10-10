@@ -1,0 +1,354 @@
+-- 퍼즈 (시드를 고정한 무작위 테스트)
+--
+-- 실패하면 시드와 마지막 이벤트들을 출력하므로 같은 상황을 그대로 재현할 수 있다.
+--   SKR_FUZZ_SEED=<시드> SKR_FUZZ_RUNS=<횟수> busted tests/fuzz_spec.lua
+--
+-- 비행 추적은 애드온 코드를 베끼지 않고 규칙만 따로 구현한 모델과 비교한다.
+--   - 목적지를 고른 뒤 10초 안에 이륙해야 추적한다
+--   - 소환·전장 입장·조기 착륙으로 중단된 비행은 기록하지 않는다
+--   - 기록 시간은 이륙부터 착륙까지의 시간이다
+-- 애드온은 0.1초마다 상태를 확인하므로 경계 근처 결과는 양쪽 다 허용한다.
+
+local wow = require("tests.wow")
+local fixtures = require("tests.fixtures")
+local format = string.format
+
+local SEED = tonumber(os.getenv("SKR_FUZZ_SEED")) or 20261011
+local RUNS = tonumber(os.getenv("SKR_FUZZ_RUNS")) or 300
+local EVENTS_PER_RUN = 40
+
+local TAKEOFF_TIMEOUT = 10
+local POLL_SLACK = 0.25     -- 상태 확인 주기(0.1초)와 시간 진행 간격에서 오는 오차 허용 범위
+local SETTLE = 0.3          -- 상태가 바뀐 뒤 애드온이 알아차릴 때까지 기다리는 시간
+local STEP = 0.1
+
+local ZONES = { "듀로타", "불모의 땅", "멀고어", "잿빛 골짜기" }
+local COMMANDS = { "show", "hide", "reset", "chat", "party", "debug", "help", "", "unknown" }
+local DESTS = { fixtures.CROSSROADS, fixtures.THUNDER_BLUFF }
+
+local function pick(list)
+    return list[math.random(#list)]
+end
+
+-- 정류장 진행도를 보기 위해 타이머 창 프레임을 찾는다 (OnEnter 스크립트가 있는 프레임)
+local function timerFrame(game)
+    for _, frame in ipairs(game.frames) do
+        if frame.scripts.OnEnter then
+            return frame
+        end
+    end
+end
+
+local function routeKey(game, dest)
+    game:openTaxiMap(fixtures.kalimdor())
+    local key = game.ns.NodeKey(fixtures.ORGRIMMAR) .. ">" .. game.ns.NodeKey(dest)
+    game:closeTaxiMap()
+    return key
+end
+
+-- 한 번의 무작위 실행. 위반이 있으면 error 로 알린다
+local function runOnce(seed)
+    math.randomseed(seed)
+    local game = wow.load()
+    local ns = game.ns
+    local log = {}
+
+    local function note(fmt, ...)
+        log[#log + 1] = format("%8.2f  " .. fmt, game.now, ...)
+    end
+
+    local function fail(message)
+        local tail = {}
+        for i = math.max(1, #log - 25), #log do
+            tail[#tail + 1] = log[i]
+        end
+        error(format("시드 %d: %s\n%s", seed, message, table.concat(tail, "\n")), 0)
+    end
+
+    local routes = {}
+    for _, dest in ipairs(DESTS) do
+        routes[dest] = routeKey(game, dest)
+    end
+
+    -- 모델: nil / { state = "pending" | "flying", dest, at, takeoff, interrupted, ambiguous }
+    local model
+    local lastStop
+
+    local function expire()
+        if model and model.state == "pending" then
+            local waited = game.now - model.at
+            if waited > TAKEOFF_TIMEOUT + POLL_SLACK then
+                model = nil
+            end
+        end
+    end
+
+    local function wait(seconds)
+        game:advance(seconds, STEP)
+        expire()
+    end
+
+    local function checkFlightState()
+        local flight = ns.GetFlight()
+        if model and model.state == "flying" and not model.ambiguous then
+            if not flight or flight.state ~= "flying" then
+                fail("모델은 비행 중인데 애드온은 추적하지 않음")
+            end
+            local stop = ns.CurrentStop(flight)
+            if stop then
+                local count = #flight.path.stops
+                if stop < 1 or stop > count then
+                    fail(format("CurrentStop 범위 벗어남: %d / %d", stop, count))
+                end
+                if lastStop and stop < lastStop then
+                    fail(format("CurrentStop 이 뒤로 감: %d → %d", lastStop, stop))
+                end
+                lastStop = stop
+            end
+        elseif not (model and model.ambiguous) and flight and flight.state == "flying" then
+            fail("모델은 추적하지 않는데 애드온은 비행으로 추적함")
+        end
+    end
+
+    local function snapshot()
+        local copy = {}
+        for key, value in pairs(ns.db.routes) do copy[key] = value end
+        return copy
+    end
+
+    local actions = {}
+
+    function actions.choose()
+        local dest = pick(DESTS)
+        note("목적지 선택 %d", dest)
+        game:openTaxiMap(fixtures.kalimdor())
+        game:call("TakeTaxiNode", dest)
+        game:closeTaxiMap()
+        model = { state = "pending", dest = dest, at = game.now }
+        lastStop = nil
+    end
+
+    function actions.takeoff()
+        note("이륙")
+        game.onTaxi = true
+        if model and model.state == "pending" then
+            local waited = game.now - model.at
+            if waited <= TAKEOFF_TIMEOUT - POLL_SLACK then
+                model.state, model.takeoff = "flying", game.now
+            elseif waited <= TAKEOFF_TIMEOUT + POLL_SLACK then
+                -- 시간 초과 경계: 추적될 수도 아닐 수도 있음
+                model.state, model.takeoff, model.ambiguous = "flying", game.now, true
+            else
+                model = nil
+            end
+        end
+        wait(SETTLE)
+    end
+
+    function actions.land()
+        note("착륙")
+        local all = snapshot()
+        local before = ns.db.routes[model and routes[model.dest] or ""]
+        game.onTaxi = false
+        wait(SETTLE)
+
+        if not (model and model.state == "flying") then
+            local after = snapshot()
+            for key in pairs(routes) do
+                key = routes[key]
+                if all[key] ~= after[key] then
+                    fail(format("추적하지 않은 착륙인데 기록이 바뀜: %s %s → %s", key, tostring(all[key]), tostring(after[key])))
+                end
+            end
+        else
+            local key = routes[model.dest]
+            local recorded = ns.db.routes[key]
+            local duration = (game.now - SETTLE) - model.takeoff
+
+            if model.ambiguous then
+                note("경계 상황이라 기록 여부는 검사하지 않음")
+            elseif model.interrupted then
+                if recorded ~= before then
+                    fail(format("중단된 비행(%s)이 기록됨: %s → %s", model.interrupted, tostring(before), tostring(recorded)))
+                end
+            else
+                if not recorded or math.abs(recorded - duration) > 1 then
+                    fail(format("기록 시간 불일치: 실제 %.2f초, 기록 %s", duration, tostring(recorded)))
+                end
+            end
+        end
+
+        if ns.GetFlight() then
+            fail("착륙 후에도 추적 상태가 남음")
+        end
+        model = nil
+        lastStop = nil
+    end
+
+    -- 소환·전장 입장은 실제로는 비행을 끝내므로 비행 중이었다면 곧바로 착륙
+    function actions.summon()
+        note("소환 수락")
+        game.env.C_SummonInfo.ConfirmSummon()
+        if model then model.interrupted = model.interrupted or "소환" end
+        if game.onTaxi then actions.land() end
+    end
+
+    function actions.battleground()
+        local accept = math.random() < 0.5
+        note("전장 입장 %s", accept and "수락" or "거절")
+        game:call("AcceptBattlefieldPort", 1, accept)
+        if accept then
+            if model then model.interrupted = model.interrupted or "전장" end
+            if game.onTaxi then actions.land() end
+        end
+    end
+
+    function actions.earlyLanding()
+        note("조기 착륙 요청")
+        game:call("TaxiRequestEarlyLanding")
+        if model and model.state == "flying" then
+            model.interrupted = model.interrupted or "조기 착륙"
+        end
+    end
+
+    function actions.zone()
+        game.zone = pick(ZONES)
+        note("지역 변경 %s", game.zone)
+        game:fire("ZONE_CHANGED_NEW_AREA")
+    end
+
+    function actions.slash()
+        local input = pick(COMMANDS)
+        note("명령 /skr %s", input)
+        game:slash(input)
+    end
+
+    function actions.hoverNode()
+        local slot = math.random(#fixtures.kalimdor().nodes)
+        note("비행 지도 노드 %d 툴팁", slot)
+        game.tooltip:ClearLines()
+        game:openTaxiMap(fixtures.kalimdor())
+        game:call("TaxiNodeOnButtonEnter", { GetID = function() return slot end })
+        game:closeTaxiMap()
+
+        local seconds = routes[slot] and ns.db.routes[routes[slot]]
+        local lines = game.tooltip.lines
+        if routes[slot] then
+            local expected = "비행 시간\t" .. (seconds and ns.FormatDuration(seconds) or "기록 없음")
+            if lines[1] ~= expected then
+                fail(format("노드 툴팁 불일치: %s / 기대 %s", tostring(lines[1]), expected))
+            end
+        elseif #lines > 0 then
+            fail("갈 수 없는 노드에 툴팁이 추가됨")
+        end
+    end
+
+    function actions.hoverTimer()
+        note("타이머 창 툴팁")
+        local frame = timerFrame(game)
+        frame.scripts.OnEnter(frame)
+        game:advance(0.6, STEP)
+        frame.scripts.OnLeave(frame)
+        expire()
+    end
+
+    function actions.wait()
+        local seconds = pick({ 0.1, 0.5, 1, 3, 9, 10, 11, 30, 90 }) + math.random()
+        note("대기 %.2f초", seconds)
+        wait(seconds)
+    end
+
+    -- 지금 가능한 행동만 고른다 (비행 중에는 비행 지도를 열 수 없음)
+    local grounded = { "choose", "choose", "takeoff", "wait", "wait", "zone", "slash", "hoverNode", "hoverTimer", "summon", "battleground" }
+    local flying = { "land", "land", "wait", "wait", "wait", "zone", "zone", "slash", "hoverTimer", "earlyLanding", "summon", "battleground" }
+
+    for _ = 1, EVENTS_PER_RUN do
+        local name = pick(game.onTaxi and flying or grounded)
+        local ok, err = pcall(actions[name])
+        if not ok then
+            if type(err) == "string" and err:match("^시드 ") then
+                error(err, 0)
+            end
+            fail("Lua 오류: " .. tostring(err))
+        end
+        checkFlightState()
+    end
+end
+
+describe("퍼즈", function()
+    it(format("비행 추적 무작위 시나리오 %d회 (시드 %d)", RUNS, SEED), function()
+        for run = 0, RUNS - 1 do
+            runOnce(SEED + run)
+        end
+    end)
+
+    it("FormatDuration / FormatClock 은 0 이상 모든 값에서 형식을 지키고 값이 보존됨", function()
+        local ns = wow.load().ns
+        math.randomseed(SEED)
+        for _ = 1, 20000 do
+            local seconds = math.random() < 0.5 and math.random(0, 100000) or math.random() * 100000
+
+            local text = ns.FormatDuration(seconds)
+            local m = tonumber(text:match("^(%d+)분")) or 0
+            local s = tonumber(text:match("(%d+)초$")) or 0
+            assert(text:match("^%d+초$") or text:match("^%d+분$") or text:match("^%d+분 %d+초$"),
+                format("FormatDuration(%s) = %s", seconds, text))
+            assert(s < 60, format("FormatDuration(%s) 초가 60 이상: %s", seconds, text))
+            assert.equal(math.floor(seconds + 0.5), m * 60 + s)
+
+            local clock = ns.FormatClock(seconds)
+            local cm, cs = clock:match("^(%d+):(%d%d)$")
+            assert(cm, format("FormatClock(%s) = %s", seconds, clock))
+            assert.equal(math.floor(seconds), tonumber(cm) * 60 + tonumber(cs))
+        end
+    end)
+
+    it("JosaRo 는 어떤 문자열에도 '로' 또는 '으로'를 돌려주고 한글 받침 규칙을 지킴", function()
+        local ns = wow.load().ns
+        math.randomseed(SEED)
+
+        local function utf8(code)
+            if code < 0x80 then return string.char(code) end
+            if code < 0x800 then
+                return string.char(0xC0 + math.floor(code / 64), 0x80 + code % 64)
+            end
+            if code < 0x10000 then
+                return string.char(0xE0 + math.floor(code / 4096), 0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+            end
+            return string.char(0xF0 + math.floor(code / 262144), 0x80 + math.floor(code / 4096) % 64,
+                0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+        end
+
+        local ranges = {
+            { 0x20, 0x7E },       -- ASCII
+            { 0xAC00, 0xD7A3 },   -- 한글 음절
+            { 0x3131, 0x318E },   -- 한글 호환 자모
+            { 0x4E00, 0x9FFF },   -- 한자
+            { 0x1F300, 0x1F5FF }, -- 이모지
+        }
+
+        for _ = 1, 20000 do
+            local parts, last = {}, nil
+            for i = 1, math.random(0, 6) do
+                local range = pick(ranges)
+                last = math.random(range[1], range[2])
+                parts[i] = utf8(last)
+            end
+            local word = table.concat(parts)
+            -- 가끔 바이트를 잘라 깨진 UTF-8 도 넣는다
+            if #word > 0 and math.random() < 0.1 then
+                word = word:sub(1, #word - 1)
+                last = nil
+            end
+
+            local josa = ns.JosaRo(word)
+            assert(josa == "로" or josa == "으로", format("JosaRo(%q) = %s", word, tostring(josa)))
+
+            if last and last >= 0xAC00 and last <= 0xD7A3 then
+                local jong = (last - 0xAC00) % 28
+                local expected = (jong == 0 or jong == 8) and "로" or "으로"
+                assert.equal(expected, josa, format("JosaRo(%q)", word))
+            end
+        end
+    end)
+end)
