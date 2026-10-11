@@ -6,6 +6,7 @@
 -- 비행 추적은 애드온 코드를 베끼지 않고 규칙만 따로 구현한 모델과 비교한다.
 --   - 목적지를 고른 뒤 10초 안에 이륙해야 추적한다
 --   - 소환·전장 입장·조기 착륙으로 중단된 비행은 기록하지 않는다
+--   - 단, 조기 착륙 지점이 최종 목적지면(직항, 마지막 구간) 중단이 아니다
 --   - 기록 시간은 이륙부터 착륙까지의 시간이다
 -- 애드온은 0.1초마다 상태를 확인하므로 경계 근처 결과는 양쪽 다 허용한다.
 
@@ -23,6 +24,26 @@ local SETTLE = 0.3          -- 상태가 바뀐 뒤 애드온이 알아차릴 �
 local STEP = 0.1
 
 local ZONES = { "듀로타", "불모의 땅", "멀고어", "잿빛 골짜기" }
+
+-- 모델이 쓰는 경로 정보: 테스트용 비행 지도에서 목적지별 정류장 지역과 누적 거리를 만든다
+local PATHS = {}
+do
+    local taxi = fixtures.kalimdor()
+    for dest, route in pairs(taxi.routes) do
+        local path, distance, last = { zones = {}, at = {} }, 0, nil
+        for i, slot in ipairs(route) do
+            local node = taxi.nodes[slot]
+            if last then
+                distance = distance + math.sqrt((node.x - last.x) ^ 2 + (node.y - last.y) ^ 2)
+            end
+            path.zones[i] = node.name:match("%((.+)%)$")
+            path.at[i] = distance
+            last = node
+        end
+        PATHS[dest] = path
+    end
+end
+local ARRIVAL_LEAD = 15     -- 도착 이만큼 전부터는 목적지 구간으로 본다
 local COMMANDS = { "show", "hide", "reset", "chat", "party", "debug", "help", "", "unknown" }
 local DESTS = { fixtures.CROSSROADS, fixtures.THUNDER_BLUFF }
 
@@ -70,7 +91,9 @@ local function runOnce(seed)
         routes[dest] = routeKey(game, dest)
     end
 
-    -- 모델: nil / { state = "pending" | "flying", dest, at, takeoff, interrupted, ambiguous }
+    -- 모델: nil / { state = "pending" | "flying", dest, at, takeoff, expected, anchor, landing, interrupted, ambiguous }
+    --   expected: 목적지를 고를 때의 기존 기록, anchor: 지역 변경 기준 정류장
+    --   landing : 처음 조기 착륙을 요청했을 때 내릴 정류장 (알 수 없으면 false)
     local model
     local lastStop
 
@@ -124,8 +147,45 @@ local function runOnce(seed)
         game:openTaxiMap(fixtures.kalimdor())
         game:call("TakeTaxiNode", dest)
         game:closeTaxiMap()
-        model = { state = "pending", dest = dest, at = game.now }
+        model = { state = "pending", dest = dest, at = game.now, expected = ns.db.routes[routes[dest]] }
         lastStop = nil
+    end
+
+    -- 경과 시간 비율로 추정한 정류장 (경과 시간 elapsed 기준)
+    local function stopByTime(path, elapsed)
+        if model.expected - elapsed <= ARRIVAL_LEAD then
+            return #path.at
+        end
+        local covered = elapsed / model.expected * path.at[#path.at]
+        local stop = 1
+        for i = 2, #path.at do
+            if path.at[i] <= covered then stop = i end
+        end
+        return stop
+    end
+
+    -- 지금 조기 착륙하면 내릴 정류장 (알 수 없으면 false). 판단이 경계에 걸리면 nil
+    local function landingStop()
+        local path = PATHS[model.dest]
+        local count = #path.at
+
+        local function at(elapsed)
+            local current = model.anchor
+            if model.expected and model.expected > 0 then
+                current = math.max(current or 1, stopByTime(path, elapsed))
+            end
+            if not current then
+                -- 비행 중 현재 정류장은 1 ~ count-1 이므로 직항은 목적지에 내린다
+                return count == 2 and count or false
+            end
+            return math.min(current + 1, count)
+        end
+
+        -- 애드온은 이륙을 최대 한 번의 확인 주기 늦게 알아차리므로 경과 시간에 그만큼 폭이 있다
+        local elapsed = game.now - model.takeoff
+        local now, early = at(elapsed), at(elapsed - POLL_SLACK)
+        if now ~= early then return nil end
+        return now
     end
 
     function actions.takeoff()
@@ -205,8 +265,35 @@ local function runOnce(seed)
 
     function actions.earlyLanding()
         note("조기 착륙 요청")
+        local flight = ns.GetFlight()
+        local chatBefore, landingBefore = #game.chat, flight and flight.landing
         game:call("TaxiRequestEarlyLanding")
-        if model and model.state == "flying" then
+
+        if not (model and model.state == "flying") then return end
+
+        -- 다시 누르면 착륙 지점도 안내도 바뀌지 않는다
+        if model.landing ~= nil then
+            if flight and flight.landing ~= landingBefore then
+                fail(format("다시 누르자 착륙 지점이 바뀜: %s → %s", tostring(landingBefore), tostring(flight.landing)))
+            end
+            if #game.chat ~= chatBefore then
+                fail("다시 누르자 안내가 또 나옴: " .. game.chat[#game.chat])
+            end
+            return
+        end
+
+        -- 착륙 지점은 처음 요청할 때 정해진다
+        local landing = landingStop()
+        model.landing = landing
+        if landing == nil then
+            note("조기 착륙 지점 판단이 경계에 걸려 기록 여부는 검사하지 않음")
+            model.ambiguous = true
+            return
+        end
+        if flight and not model.ambiguous and flight.landing ~= landing then
+            fail(format("착륙 지점 불일치: 모델 %s, 애드온 %s", tostring(landing), tostring(flight.landing)))
+        end
+        if landing ~= #PATHS[model.dest].at then
             model.interrupted = model.interrupted or "조기 착륙"
         end
     end
@@ -215,6 +302,17 @@ local function runOnce(seed)
         game.zone = pick(ZONES)
         note("지역 변경 %s", game.zone)
         game:fire("ZONE_CHANGED_NEW_AREA")
+
+        -- 지역이 바뀌면 앞으로 남은 정류장 중 그 지역의 첫 정류장으로 기준점을 옮긴다 (뒤로는 안 감)
+        if model and model.state == "flying" then
+            local zones = PATHS[model.dest].zones
+            for i = (model.anchor or 1) + 1, #zones do
+                if zones[i] == game.zone then
+                    model.anchor = i
+                    break
+                end
+            end
+        end
     end
 
     function actions.slash()
