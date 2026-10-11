@@ -228,3 +228,81 @@ if TaxiRequestEarlyLanding then
         interrupt("조기 착륙", message)
     end)
 end
+
+
+--[[ 대화 비행 진단 (#3) ]]
+-- 드루이드 히포그리프처럼 비행 지도 없이 대화 선택지로 출발하는 비행을 구현하기 전에,
+-- 디버그 모드에서 대화 선택과 그 뒤의 이륙·착륙을 출력해 실제 동작을 확인한다.
+
+local gossipWatcher = CreateFrame("Frame")
+gossipWatcher:Hide()
+
+-- "Creature-0-1234-1-56-11798-0000ABCD" → "11798"
+local function npcID()
+    local guid = UnitGUID("npc")
+    return guid and strmatch(guid, "^%a+%-%d+%-%d+%-%d+%-%d+%-(%d+)") or "?"
+end
+
+local function optionName(index)
+    for _, option in ipairs(C_GossipInfo.GetOptions() or {}) do
+        if option.orderIndex == index then
+            return option.name, option.gossipOptionID
+        end
+    end
+end
+
+-- index 또는 optionID 중 하나로 고른 선택지. 조회는 디버그 모드에서만 한다.
+local function gossipSelected(index, optionID)
+    if not ns.IsDebug() then return end
+
+    local name
+    if index then
+        name, optionID = optionName(index)
+    end
+    ns.Debug("대화 선택: NPC %s, 선택지 \"%s\" (id %s)", npcID(), name or "?", tostring(optionID))
+
+    gossipWatcher.selected = GetTime()
+    gossipWatcher.started = nil
+    gossipWatcher.wait = 0
+    gossipWatcher:Show()
+end
+
+-- 임시 진단이라 기존 watcher 와 상태를 섞지 않고 따로 폴링한다.
+-- #3 을 구현할 때 대화 비행도 flight(pending) 로 만들어 watcher 에 합친다.
+gossipWatcher:SetScript("OnUpdate", function(self, elapsed)
+    self.wait = self.wait - elapsed
+    if self.wait > 0 then return end
+    self.wait = POLL_INTERVAL
+
+    local onTaxi = UnitOnTaxi("player")
+
+    if not self.started then
+        if onTaxi then
+            -- 비행 지도로 출발했으면 이미 추적 중이므로 대화 비행이 아니다
+            if flight then return self:Hide() end
+            self.started = GetTime()
+            ns.Debug("비행 지도 없이 이륙: 대화 선택 %.1f초 후, 지역 %s",
+                self.started - self.selected, tostring(GetRealZoneText()))
+        elseif GetTime() - self.selected > TAKEOFF_TIMEOUT then
+            self:Hide()
+        end
+    elseif not onTaxi then
+        ns.Debug("비행 지도 없이 착륙: %s, 지역 %s",
+            ns.FormatDuration(GetTime() - self.started), tostring(GetRealZoneText()))
+        self:Hide()
+    end
+end)
+
+if C_GossipInfo then
+    if C_GossipInfo.SelectOptionByIndex then
+        hooksecurefunc(C_GossipInfo, "SelectOptionByIndex", function(index)
+            gossipSelected(index)
+        end)
+    end
+    -- 대화창 애드온은 선택지 ID 로 고르기도 한다
+    if C_GossipInfo.SelectOption then
+        hooksecurefunc(C_GossipInfo, "SelectOption", function(optionID)
+            gossipSelected(nil, optionID)
+        end)
+    end
+end

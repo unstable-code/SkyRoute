@@ -80,8 +80,12 @@ function ns.Print(message, force)
     end
 end
 
+function ns.IsDebug()
+    return ns.db and ns.db.settings.debug
+end
+
 function ns.Debug(pattern, ...)
-    if ns.db and ns.db.settings.debug then
+    if ns.IsDebug() then
         DEFAULT_CHAT_FRAME:AddMessage(PREFIX .. "|cff888888" .. format(pattern, ...) .. "|r")
     end
 end

@@ -14,9 +14,9 @@ read_globals = {
     "strbyte", "strmatch", "strlower", "strtrim", "tinsert",
     -- 프레임·UI
     "CreateFrame", "UIParent", "GameTooltip", "DEFAULT_CHAT_FRAME", "BackdropTemplateMixin",
-    "hooksecurefunc", "Enum", "C_Map", "C_SummonInfo",
+    "hooksecurefunc", "Enum", "C_Map", "C_SummonInfo", "C_GossipInfo",
     -- 유닛·그룹·채팅
-    "GetTime", "UnitOnTaxi", "GetRealZoneText", "IsInGroup", "IsInRaid", "SendChatMessage",
+    "GetTime", "UnitOnTaxi", "UnitGUID", "GetRealZoneText", "IsInGroup", "IsInRaid", "SendChatMessage",
     -- 비행 지도
     "NumTaxiNodes", "TaxiNodeName", "TaxiNodePosition", "TaxiNodeGetType",
     "GetNumRoutes", "TaxiGetNodeSlot", "TakeTaxiNode", "TaxiRequestEarlyLanding",

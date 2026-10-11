@@ -154,6 +154,16 @@ local function buildEnv(game)
     env.TaxiNodeOnButtonEnter = noop
     env.C_SummonInfo = { ConfirmSummon = noop }
 
+    -- 대화창: game.gossip = { guid = "Creature-...", options = { {name, gossipOptionID, orderIndex}, ... } }
+    env.UnitGUID = function(unit)
+        return unit == "npc" and game.gossip and game.gossip.guid or nil
+    end
+    env.C_GossipInfo = {
+        GetOptions = function() return game.gossip and game.gossip.options or {} end,
+        SelectOptionByIndex = noop,
+        SelectOption = noop,
+    }
+
     return env
 end
 
@@ -211,6 +221,12 @@ function Game:closeTaxiMap()
     self.taxi = nil
 end
 
+-- 대화창을 열고 선택지를 고른다 (Blizzard 대화창처럼 orderIndex 로 선택)
+function Game:selectGossip(gossip, index)
+    self.gossip = gossip
+    self.env.C_GossipInfo.SelectOptionByIndex(index)
+end
+
 function Game:call(name, ...)
     return self.env[name](...)
 end
@@ -228,6 +244,17 @@ function Game:plainChat()
     local lines = {}
     for i, message in ipairs(self.chat) do
         lines[i] = message:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    end
+    return lines
+end
+
+-- 디버그 출력(ns.Debug 의 회색 줄)만 접두어를 떼고 색상 코드를 걷어낸 기록
+function Game:debugChat()
+    local plain, lines = self:plainChat(), {}
+    for i, message in ipairs(self.chat) do
+        if message:find("|cff888888", 1, true) then
+            lines[#lines + 1] = (plain[i]:gsub("^SkyRoute ", ""))
+        end
     end
     return lines
 end
