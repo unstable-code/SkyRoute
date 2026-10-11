@@ -147,8 +147,9 @@ local function fillTooltip()
     if f.interrupted then
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(f.interrupted .. " — 이번 비행은 기록하지 않습니다.", 1, 0.5, 0.25)
-        if f.landingAt then
-            addRow("착륙 예정", f.landingAt)
+        local landing = f.landing and f.path.stops[f.landing]
+        if landing then
+            addRow("착륙 예정", landing.name)
         end
     end
 

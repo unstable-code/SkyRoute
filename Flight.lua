@@ -60,6 +60,19 @@ function ns.CurrentStop(f)
     return reached
 end
 
+-- 지금 조기 착륙을 요청하면 내릴 정류장 번호. #stops 면 목적지, 알 수 없으면 nil.
+-- 비행 중 현재 정류장은 1 ~ #stops-1 이므로 직항은 추정 없이도 목적지에 내린다.
+function ns.LandingStop(f)
+    local stops = f.path and f.path.stops
+    if not stops then return nil end
+
+    local current = ns.CurrentStop(f)
+    if not current then
+        return #stops == 2 and 2 or nil
+    end
+    return min(current + 1, #stops)
+end
+
 -- 지역이 바뀌면 앞으로 남은 정류장 중 그 지역에 속한 첫 정류장까지 기준점을 옮긴다.
 -- 뒤로는 움직이지 않으므로 경계를 오가며 지역이 번갈아 바뀌어도 흔들리지 않는다.
 ns.On("ZONE_CHANGED_NEW_AREA", function()
@@ -195,15 +208,23 @@ end)
 if TaxiRequestEarlyLanding then
     hooksecurefunc("TaxiRequestEarlyLanding", function()
         if not flight or flight.state ~= "flying" then return end
+        -- 착륙 지점은 처음 요청할 때 정해지므로 다시 눌러도 바꾸지 않는다
+        -- landing: 내릴 정류장 번호, 알 수 없으면 false
+        if flight.landing ~= nil then return end
+        local landing = ns.LandingStop(flight)
+        flight.landing = landing or false
 
-        local message = "조기 착륙을 요청해 비행 기록을 중단합니다."
-        local current = ns.CurrentStop(flight)
-        local nextStop = current and flight.path.stops[current + 1]
-        if nextStop then
-            message = format("조기 착륙을 요청해 비행 기록을 중단합니다. %s에 내릴 예정입니다.", ns.Em(nextStop.name))
+        -- 목적지에 내리면 끝까지 같은 경로를 비행하므로 중단이 아니다
+        if landing and landing == #flight.path.stops then
+            ns.Print(format("%s에 그대로 내리므로 비행 기록을 계속합니다.", ns.Em(flight.toName)))
+            return
         end
 
+        local message = "조기 착륙을 요청해 비행 기록을 중단합니다."
+        if landing then
+            message = format("조기 착륙을 요청해 비행 기록을 중단합니다. %s에 내릴 예정입니다.",
+                ns.Em(flight.path.stops[landing].name))
+        end
         interrupt("조기 착륙", message)
-        flight.landingAt = nextStop and nextStop.name
     end)
 end

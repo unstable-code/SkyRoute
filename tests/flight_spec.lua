@@ -2,6 +2,7 @@ local wow = require("tests.wow")
 local fixtures = require("tests.fixtures")
 
 local ORGRIMMAR_KEY = "10:0.500:0.300"
+local CROSSROADS_KEY = "10:0.500:0.500"
 local THUNDER_BLUFF_KEY = "10:0.500:0.900"
 
 -- 비행 지도에서 목적지를 고르고 지도를 닫는다 (이륙은 하지 않음)
@@ -11,12 +12,27 @@ local function chooseDestination(game, dest)
     game:closeTaxiMap()
 end
 
--- 목적지를 골라 이륙하고 seconds 동안 비행한 뒤 착륙
-local function fly(game, dest, seconds)
+-- 목적지를 골라 이륙하고 seconds 동안 비행한 뒤 추적 중인 비행을 돌려준다 (착륙하지 않음)
+local function takeOff(game, dest, seconds)
+    chooseDestination(game, dest)
+    game.onTaxi = true
+    game:advance(seconds)
+    return game.ns.GetFlight()
+end
+
+-- 목적지를 골라 이륙하고 seconds 동안 비행한 뒤 착륙.
+-- during 이 있으면 이륙 후 at 초에 실행한다 (조기 착륙·소환 등)
+local function fly(game, dest, seconds, at, during)
     chooseDestination(game, dest)
     game:advance(0.5)
     game.onTaxi = true
-    game:advance(seconds)
+    if during then
+        game:advance(at)
+        during()
+        game:advance(seconds - at)
+    else
+        game:advance(seconds)
+    end
     game.onTaxi = false
     game:advance(0.5)
 end
@@ -80,15 +96,13 @@ describe("비행 추적", function()
     end)
 
     describe("중단", function()
+        -- 이륙 후 20초에 interrupt 를 실행하고 30초에 착륙
         local function interruptedFlight(interrupt)
-            chooseDestination(game, fixtures.THUNDER_BLUFF)
-            game:advance(0.5)
-            game.onTaxi = true
-            game:advance(20)
-            interrupt()
-            game:advance(10)
-            game.onTaxi = false
-            game:advance(0.5)
+            fly(game, fixtures.THUNDER_BLUFF, 30, 20, interrupt)
+        end
+
+        local function earlyLanding()
+            game:call("TaxiRequestEarlyLanding")
         end
 
         it("소환을 수락하면 기록하지 않음", function()
@@ -108,14 +122,14 @@ describe("비행 추적", function()
         end)
 
         it("조기 착륙하면 기록하지 않고 내릴 정류장을 안내", function()
-            interruptedFlight(function() game:call("TaxiRequestEarlyLanding") end)
+            interruptedFlight(earlyLanding)
             assert.same({}, ns.db.routes)
             assert.equal("SkyRoute 조기 착륙을 요청해 비행 기록을 중단합니다.", game:plainChat()[2])
         end)
 
         it("기록이 있으면 조기 착륙 시 다음 정류장을 안내", function()
             ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
-            interruptedFlight(function() game:call("TaxiRequestEarlyLanding") end)
+            interruptedFlight(earlyLanding)
             assert.equal(120, ns.GetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY))
             assert.equal("SkyRoute 조기 착륙을 요청해 비행 기록을 중단합니다. 크로스로드에 내릴 예정입니다.",
                 game:plainChat()[1])
@@ -123,8 +137,72 @@ describe("비행 추적", function()
 
         it("비행 중이 아닐 때의 조기 착륙 요청은 무시", function()
             chooseDestination(game, fixtures.THUNDER_BLUFF)
-            game:call("TaxiRequestEarlyLanding")
+            earlyLanding()
             assert.is_nil(ns.GetFlight().interrupted)
+            assert.is_nil(ns.GetFlight().landing)
+        end)
+
+        describe("내릴 정류장이 최종 목적지면 그대로 기록", function()
+            it("마지막 구간에서 누름", function()
+                ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
+                fly(game, fixtures.THUNDER_BLUFF, 118, 60, earlyLanding)
+                assert.equal(118, ns.GetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY))
+                assert.equal("SkyRoute 썬더 블러프에 그대로 내리므로 비행 기록을 계속합니다.", game:plainChat()[1])
+            end)
+
+            it("도착 15초 전 이후에 누름", function()
+                ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
+                fly(game, fixtures.THUNDER_BLUFF, 121, 110, earlyLanding)
+                assert.equal(121, ns.GetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY))
+            end)
+
+            it("직항은 기록이 없어도", function()
+                fly(game, fixtures.CROSSROADS, 30, 5, earlyLanding)
+                assert.equal(30, ns.GetDuration(ORGRIMMAR_KEY, CROSSROADS_KEY))
+            end)
+
+            it("기록이 없어도 지역 변경으로 마지막 구간임을 알면", function()
+                fly(game, fixtures.THUNDER_BLUFF, 90, 40, function()
+                    game.zone = "불모의 땅"
+                    game:fire("ZONE_CHANGED_NEW_AREA")
+                    earlyLanding()
+                end)
+                assert.equal(90, ns.GetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY))
+            end)
+        end)
+
+        it("다시 눌러도 처음 요청한 착륙 지점과 안내를 유지", function()
+            ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
+            takeOff(game, fixtures.THUNDER_BLUFF, 20)
+            earlyLanding()
+            game:advance(40)
+            earlyLanding()
+
+            assert.equal(fixtures.CROSSROADS, ns.GetFlight().landing)
+            assert.equal(1, #game.chat)
+        end)
+    end)
+
+    describe("LandingStop", function()
+        it("직항은 현재 정류장을 몰라도 목적지", function()
+            assert.equal(2, ns.LandingStop(takeOff(game, fixtures.CROSSROADS, 1)))
+        end)
+
+        it("경유 경로에서 현재 정류장을 모르면 nil", function()
+            assert.is_nil(ns.LandingStop(takeOff(game, fixtures.THUNDER_BLUFF, 1)))
+        end)
+
+        it("경유 경로의 첫 구간이면 다음 정류장", function()
+            ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
+            assert.equal(2, ns.LandingStop(takeOff(game, fixtures.THUNDER_BLUFF, 20)))
+        end)
+
+        it("마지막 구간이나 도착 직전이면 목적지", function()
+            ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 60)
+            assert.equal(3, ns.LandingStop(flight))
+            game:advance(50)
+            assert.equal(3, ns.LandingStop(flight))
         end)
     end)
 
