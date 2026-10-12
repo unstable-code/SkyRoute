@@ -66,7 +66,7 @@ end
 
 -- 현재 위치에서 dest 까지 거쳐 가는 정류장 목록.
 -- 각 정류장의 at 은 출발점부터의 누적 직선 거리이며, 비행 속도가 일정하다고 보고
--- 경과 시간 비율로 현재 구간을 추정하는 데 쓴다.
+-- 경과 시간 비율로 현재 구간을 추정하는 데 쓴다. key 는 노드 키로, 구간별 학습에 쓴다.
 -- 비행 지도가 경로선을 그릴 때 쓰는 API 가 없거나 값이 이상하면 nil.
 function ns.BuildPath(dest)
     if not (GetNumRoutes and TaxiGetNodeSlot) then return nil end
@@ -100,7 +100,7 @@ function ns.BuildPath(dest)
         lastX, lastY = x, y
 
         local name, zone = ns.NodeLabel(slot)
-        stops[i] = { name = name, zone = zone, at = length }
+        stops[i] = { name = name, zone = zone, at = length, key = ns.NodeKey(slot) }
     end
 
     return { stops = stops, length = length }

@@ -163,8 +163,7 @@ describe("비행 추적", function()
 
             it("기록이 없어도 지역 변경으로 마지막 구간임을 알면", function()
                 fly(game, fixtures.THUNDER_BLUFF, 90, 40, function()
-                    game.zone = "불모의 땅"
-                    game:fire("ZONE_CHANGED_NEW_AREA")
+                    game:enterZone("불모의 땅")
                     earlyLanding()
                 end)
                 assert.equal(90, ns.GetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY))
@@ -212,8 +211,7 @@ describe("비행 추적", function()
             game.onTaxi = true
             game:advance(1)
 
-            game.zone = "불모의 땅"
-            game:fire("ZONE_CHANGED_NEW_AREA")
+            game:enterZone("불모의 땅")
             assert.equal(2, ns.GetFlight().anchor)
             assert.equal(2, ns.CurrentStop(ns.GetFlight()))
         end)
@@ -223,11 +221,94 @@ describe("비행 추적", function()
             game.onTaxi = true
             game:advance(1)
 
-            game.zone = "불모의 땅"
-            game:fire("ZONE_CHANGED_NEW_AREA")
-            game.zone = "듀로타"
-            game:fire("ZONE_CHANGED_NEW_AREA")
+            game:enterZone("불모의 땅")
+            game:enterZone("듀로타")
             assert.equal(2, ns.GetFlight().anchor)
+        end)
+    end)
+
+    describe("지나가는 지역", function()
+        local function names(flight)
+            local list = {}
+            for i, stop in ipairs(flight.path.stops) do
+                list[i] = stop.name .. (stop.pass and "*" or "")
+            end
+            return table.concat(list, " → ")
+        end
+
+        it("처음 보는 지역은 지금 구간에 끼워 넣고 경유지 개수에 포함", function()
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 1)
+            game:enterZone("잿빛 골짜기")
+            assert.equal("오그리마 → 잿빛 골짜기* → 크로스로드 → 썬더 블러프", names(flight))
+            assert.equal(2, ns.CurrentStop(flight))
+
+            local frame = game:timerFrame()
+            frame.scripts.OnEnter(frame)
+            assert.truthy(table.concat(game.tooltip.lines, "\n"):find("경유지\t2 / 4", 1, true))
+        end)
+
+        it("5초 이상 머문 뒤 벗어나면 학습해 같은 구간을 지나는 다른 경로에도 끼워 넣음", function()
+            takeOff(game, fixtures.THUNDER_BLUFF, 1)
+            game:enterZone("잿빛 골짜기")
+            game:advance(5.1)
+            game:enterZone("불모의 땅")
+            assert.same({ "잿빛 골짜기" }, ns.GetPasses(ORGRIMMAR_KEY, CROSSROADS_KEY))
+
+            game.onTaxi = false
+            game:advance(1)
+            assert.equal("오그리마 → 잿빛 골짜기* → 크로스로드", names(takeOff(game, fixtures.CROSSROADS, 1)))
+        end)
+
+        it("5초 미만이면 이번 비행에만 표시하고 학습하지 않음", function()
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 1)
+            game:enterZone("잿빛 골짜기")
+            game:advance(4.9)
+            game:enterZone("불모의 땅")
+            assert.is_nil(ns.GetPasses(ORGRIMMAR_KEY, CROSSROADS_KEY))
+            assert.equal("오그리마 → 잿빛 골짜기* → 크로스로드 → 썬더 블러프", names(flight))
+        end)
+
+        it("경계를 오가도 한 번만 넣고, 다시 들어가 5초 머물면 학습", function()
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 1)
+            game:enterZone("잿빛 골짜기")
+            game:advance(2)
+            game:enterZone("듀로타")
+            game:enterZone("잿빛 골짜기")
+            game:advance(5.1)
+            game:enterZone("불모의 땅")
+            assert.equal("오그리마 → 잿빛 골짜기* → 크로스로드 → 썬더 블러프", names(flight))
+            assert.same({ "잿빛 골짜기" }, ns.GetPasses(ORGRIMMAR_KEY, CROSSROADS_KEY))
+        end)
+
+        it("목적지 지역에 들어선 뒤의 지역은 끼워 넣지 않음", function()
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 1)
+            game:enterZone("멀고어")
+            game:enterZone("잿빛 골짜기")
+            assert.equal("오그리마 → 크로스로드 → 썬더 블러프", names(flight))
+        end)
+
+        it("도시 이름으로 바뀌면 그 정류장에 들어선 것으로 봄", function()
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 1)
+            game:enterZone("크로스로드")
+            assert.equal("오그리마 → 크로스로드 → 썬더 블러프", names(flight))
+            assert.equal(2, flight.anchor)
+        end)
+
+        it("조기 착륙은 지나가는 지역을 건너뛴 다음 정류장에 내림", function()
+            ns.SetPasses(ORGRIMMAR_KEY, CROSSROADS_KEY, { "잿빛 골짜기" })
+            ns.SetDuration(ORGRIMMAR_KEY, THUNDER_BLUFF_KEY, 120)
+            local flight = takeOff(game, fixtures.THUNDER_BLUFF, 5)
+            game:call("TaxiRequestEarlyLanding")
+            assert.equal("크로스로드", flight.path.stops[flight.landing].name)
+            assert.equal("SkyRoute 조기 착륙을 요청해 비행 기록을 중단합니다. 크로스로드에 내릴 예정입니다.",
+                game:plainChat()[1])
+        end)
+
+        it("직항은 지나가는 지역이 있어도 목적지에 내림", function()
+            ns.SetPasses(ORGRIMMAR_KEY, CROSSROADS_KEY, { "잿빛 골짜기" })
+            local flight = takeOff(game, fixtures.CROSSROADS, 1)
+            assert.equal(3, ns.LandingStop(flight))
+            assert.equal("크로스로드", flight.path.stops[3].name)
         end)
     end)
 

@@ -30,6 +30,37 @@ end
 
 
 --[[ 정류장 진행도 ]]
+--
+-- path.stops 는 비행 지도에서 얻은 정류장(내릴 수 있는 곳)과 그 사이에 내리지 않고 지나가는
+-- 지역(pass = true)을 비행 순서대로 담는다. 비행 지도는 발견한 비행 지점만으로 경로를 보여 주므로,
+-- 실제로 지나가는 곳은 비행 중 지역 변경으로 알아내 구간별로 학습한다.
+
+local MIN_PASS_DWELL = 5 -- 지나가는 지역에 이만큼(초) 이상 머물러야 학습 (경계를 스친 지역 제외)
+
+local function passStop(name, at, learned)
+    return { name = name, zone = name, at = at, pass = true, learned = learned }
+end
+
+-- 학습해 둔 지나가는 지역을 정류장 사이에 끼워 넣는다. 위치(at)는 구간 안에 고르게 나눈다.
+function ns.AddPasses(path)
+    if not path then return nil end
+
+    local stops, merged = path.stops, {}
+    for i, stop in ipairs(stops) do
+        merged[#merged + 1] = stop
+        local nextStop = stops[i + 1]
+        local names = nextStop and ns.GetPasses(stop.key, nextStop.key)
+        if names then
+            local gap = (nextStop.at - stop.at) / (#names + 1)
+            for k, name in ipairs(names) do
+                merged[#merged + 1] = passStop(name, stop.at + gap * k, true)
+            end
+        end
+    end
+
+    path.stops = merged
+    return path
+end
 
 -- 비행 중 현재 지나고 있는 정류장 번호. 경과 시간 비율 추정과 지역 변경 기준점 중
 -- 더 앞선 쪽을 쓴다. 둘 다 없으면(처음 가는 경로이고 지역도 안 바뀜) nil.
@@ -61,20 +92,60 @@ function ns.CurrentStop(f)
 end
 
 -- 지금 조기 착륙을 요청하면 내릴 정류장 번호. #stops 면 목적지, 알 수 없으면 nil.
--- 비행 중 현재 정류장은 1 ~ #stops-1 이므로 직항은 추정 없이도 목적지에 내린다.
+-- 지나가는 지역에는 내릴 수 없으므로 다음 정류장을 찾을 때 건너뛴다.
+-- 내릴 수 있는 정류장이 둘뿐인 직항은 추정 없이도 목적지에 내린다.
 function ns.LandingStop(f)
     local stops = f.path and f.path.stops
     if not stops then return nil end
 
     local current = ns.CurrentStop(f)
-    if not current then
-        return #stops == 2 and 2 or nil
+    if current == #stops then return current end
+
+    local landing = (current or 1) + 1
+    while stops[landing].pass do
+        landing = landing + 1
     end
-    return min(current + 1, #stops)
+    if current or landing == #stops then
+        return landing
+    end
 end
 
--- 지역이 바뀌면 앞으로 남은 정류장 중 그 지역에 속한 첫 정류장까지 기준점을 옮긴다.
--- 뒤로는 움직이지 않으므로 경계를 오가며 지역이 번갈아 바뀌어도 흔들리지 않는다.
+-- 도시 위를 날 때는 지역 이름 대신 정류장(도시) 이름이 나오기도 한다
+local function matches(stop, zone)
+    return stop.zone == zone or stop.name == zone
+end
+
+-- 지나가는 지역 index 를 둘러싼 구간의 앞뒤 정류장 번호
+local function hopAround(stops, index)
+    local from, to = index - 1, index + 1
+    while stops[from].pass do from = from - 1 end
+    while stops[to].pass do to = to + 1 end
+    return from, to
+end
+
+-- 한 구간에서 학습한 지나가는 지역을 비행 순서대로 저장
+local function savePasses(stops, from, to)
+    local names = {}
+    for i = from + 1, to - 1 do
+        if stops[i].learned then
+            names[#names + 1] = stops[i].name
+        end
+    end
+    ns.SetPasses(stops[from].key, stops[to].key, names)
+end
+
+local function watchPass(index)
+    local stop = flight.path.stops[index]
+    if stop.pass and not stop.learned then
+        flight.pendingPass = { index = index, since = GetTime() }
+    end
+end
+
+-- 지역이 바뀌면
+--   1. 앞으로 남은 정류장·지나가는 지역 중 그 지역의 첫 곳까지 기준점을 옮긴다.
+--   2. 이미 지난 곳이면 무시한다. 기준점은 뒤로 움직이지 않으므로 경계를 오가도 흔들리지 않는다.
+--   3. 처음 보는 지역이면 지금 구간의 기준점 바로 뒤에 지나가는 지역으로 끼워 넣는다.
+-- 지나가는 지역을 벗어날 때 MIN_PASS_DWELL 이상 머물렀으면 그 구간의 학습 목록에 저장한다.
 ns.On("ZONE_CHANGED_NEW_AREA", function()
     if not (flight and flight.state == "flying" and flight.path) then return end
 
@@ -82,13 +153,39 @@ ns.On("ZONE_CHANGED_NEW_AREA", function()
     local stops = flight.path.stops
     ns.Debug("지역 변경: %s", tostring(zone))
 
-    for i = (flight.anchor or 1) + 1, #stops do
-        if stops[i].zone == zone then
+    local pending = flight.pendingPass
+    flight.pendingPass = nil
+    if pending and GetTime() - pending.since >= MIN_PASS_DWELL then
+        stops[pending.index].learned = true
+        savePasses(stops, hopAround(stops, pending.index))
+        ns.Debug("지나가는 지역 학습: %s", stops[pending.index].name)
+    end
+
+    if not zone or zone == "" then return end
+
+    local anchor = flight.anchor or 1
+    for i = anchor + 1, #stops do
+        if matches(stops[i], zone) then
             flight.anchor = i
+            watchPass(i)
             ns.Debug("기준 정류장 → %d/%d %s", i, #stops, stops[i].name)
             return
         end
     end
+
+    for i = anchor, 1, -1 do
+        if matches(stops[i], zone) then
+            if i == anchor then watchPass(i) end
+            return
+        end
+    end
+
+    -- 목적지에 들어선 뒤에는 끼워 넣을 구간이 없다
+    if anchor == #stops then return end
+    tinsert(stops, anchor + 1, passStop(zone, (stops[anchor].at + stops[anchor + 1].at) / 2))
+    flight.anchor = anchor + 1
+    watchPass(anchor + 1)
+    ns.Debug("지나가는 지역 → %d/%d %s", anchor + 1, #stops, zone)
 end)
 
 
@@ -173,7 +270,7 @@ hooksecurefunc("TakeTaxiNode", function(dest)
         toName = (ns.NodeLabel(dest)),
         expected = ns.GetDuration(fromKey, toKey),
         -- 경유 경로는 비행 지도가 열려 있는 지금만 조회할 수 있다
-        path = ns.BuildPath(dest),
+        path = ns.AddPasses(ns.BuildPath(dest)),
     }
     ns.Debug("목적지 선택: %s → %s", fromKey, toKey)
 

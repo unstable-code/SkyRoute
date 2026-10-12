@@ -8,6 +8,8 @@
 --   - 소환·전장 입장·조기 착륙으로 중단된 비행은 기록하지 않는다
 --   - 단, 조기 착륙 지점이 최종 목적지면(직항, 마지막 구간) 중단이 아니다
 --   - 기록 시간은 이륙부터 착륙까지의 시간이다
+--   - 정류장 사이에 처음 보는 지역에 들어서면 지나가는 지역으로 끼워 넣고, 5초 이상 머문 뒤
+--     벗어나면 그 구간에 학습한다. 조기 착륙은 지나가는 지역을 건너뛴 다음 정류장에 내린다
 -- 애드온은 0.1초마다 상태를 확인하므로 경계 근처 결과는 양쪽 다 허용한다.
 
 local wow = require("tests.wow")
@@ -23,20 +25,23 @@ local POLL_SLACK = 0.25     -- 상태 확인 주기(0.1초)와 시간 진행 간
 local SETTLE = 0.3          -- 상태가 바뀐 뒤 애드온이 알아차릴 때까지 기다리는 시간
 local STEP = 0.1
 
-local ZONES = { "듀로타", "불모의 땅", "멀고어", "잿빛 골짜기" }
+-- 정류장 지역, 정류장 밖 지역, 도시 이름(정류장 이름과 같음)
+local ZONES = { "듀로타", "불모의 땅", "멀고어", "잿빛 골짜기", "버섯구름 봉우리", "썬더 블러프" }
+local MIN_PASS_DWELL = 5
 
--- 모델이 쓰는 경로 정보: 테스트용 비행 지도에서 목적지별 정류장 지역과 누적 거리를 만든다
+-- 모델이 쓰는 경로 정보: 테스트용 비행 지도에서 목적지별 정류장(이름, 지역, 슬롯)과 누적 거리를 만든다
 local PATHS = {}
 do
     local taxi = fixtures.kalimdor()
     for dest, route in pairs(taxi.routes) do
-        local path, distance, last = { zones = {}, at = {} }, 0, nil
+        local path, distance, last = { stops = {}, at = {} }, 0, nil
         for i, slot in ipairs(route) do
             local node = taxi.nodes[slot]
             if last then
                 distance = distance + math.sqrt((node.x - last.x) ^ 2 + (node.y - last.y) ^ 2)
             end
-            path.zones[i] = node.name:match("%((.+)%)$")
+            local name, zone = node.name:match("^(.-) %((.+)%)$")
+            path.stops[i] = { name = name, zone = zone, slot = slot }
             path.at[i] = distance
             last = node
         end
@@ -49,22 +54,6 @@ local DESTS = { fixtures.CROSSROADS, fixtures.THUNDER_BLUFF }
 
 local function pick(list)
     return list[math.random(#list)]
-end
-
--- 정류장 진행도를 보기 위해 타이머 창 프레임을 찾는다 (OnEnter 스크립트가 있는 프레임)
-local function timerFrame(game)
-    for _, frame in ipairs(game.frames) do
-        if frame.scripts.OnEnter then
-            return frame
-        end
-    end
-end
-
-local function routeKey(game, dest)
-    game:openTaxiMap(fixtures.kalimdor())
-    local key = game.ns.NodeKey(fixtures.ORGRIMMAR) .. ">" .. game.ns.NodeKey(dest)
-    game:closeTaxiMap()
-    return key
 end
 
 -- 한 번의 무작위 실행. 위반이 있으면 error 로 알린다
@@ -86,16 +75,73 @@ local function runOnce(seed)
         error(format("시드 %d: %s\n%s", seed, message, table.concat(tail, "\n")), 0)
     end
 
+    local taxi = fixtures.kalimdor()
+    local nodeKeys = {}
+    game:openTaxiMap(taxi)
+    for slot in ipairs(taxi.nodes) do
+        nodeKeys[slot] = ns.NodeKey(slot)
+    end
+    game:closeTaxiMap()
+
     local routes = {}
     for _, dest in ipairs(DESTS) do
-        routes[dest] = routeKey(game, dest)
+        routes[dest] = nodeKeys[fixtures.ORGRIMMAR] .. ">" .. nodeKeys[dest]
     end
 
-    -- 모델: nil / { state = "pending" | "flying", dest, at, takeoff, expected, anchor, landing, interrupted, ambiguous }
-    --   expected: 목적지를 고를 때의 기존 기록, anchor: 지역 변경 기준 정류장
-    --   landing : 처음 조기 착륙을 요청했을 때 내릴 정류장 (알 수 없으면 false)
+    -- 모델: nil / { state = "pending" | "flying", dest, at, takeoff, expected, anchor, landing, interrupted, ambiguous,
+    --               points, pending }
+    --   expected: 목적지를 고를 때의 기존 기록, anchor: 지역 변경 기준점 (points 번호)
+    --   landing : 처음 조기 착륙을 요청했을 때 내릴 정류장 (PATHS 정류장 번호, 알 수 없으면 false)
+    --   points  : 정류장과 지나가는 지역을 비행 순서대로. 정류장은 stop(정류장 번호), 지나가는 지역은
+    --             hop(구간 시작 정류장 번호)과 learned 를 가진다
+    --   pending : 지금 머무는 아직 학습하지 않은 지나가는 지역 { point, since }
     local model
     local lastStop
+    -- 구간 키("정류장 노드 키>다음 정류장 노드 키") → 학습한 지나가는 지역 이름 목록
+    local learned = {}
+
+    local function hopKey(path, h)
+        return nodeKeys[path.stops[h].slot] .. ">" .. nodeKeys[path.stops[h + 1].slot]
+    end
+
+    local function buildPoints(dest)
+        local path, points = PATHS[dest], {}
+        for h, stop in ipairs(path.stops) do
+            points[#points + 1] = { name = stop.name, zone = stop.zone, stop = h }
+            if path.stops[h + 1] then
+                for _, name in ipairs(learned[hopKey(path, h)] or {}) do
+                    points[#points + 1] = { name = name, zone = name, hop = h, learned = true }
+                end
+            end
+        end
+        return points
+    end
+
+    -- 노드 키 → 정류장 (이름, 지역)
+    local stopByKey = {}
+    for _, path in pairs(PATHS) do
+        for _, stop in ipairs(path.stops) do
+            stopByKey[nodeKeys[stop.slot]] = stop
+        end
+    end
+
+    -- 구간 키 → 이름 목록 표를 키 순서대로 문자열로
+    local function serialize(passes)
+        local lines = {}
+        for key, names in pairs(passes) do
+            lines[#lines + 1] = key .. " = " .. table.concat(names, ", ")
+        end
+        table.sort(lines)
+        return table.concat(lines, "; ")
+    end
+
+    -- 애드온 상태를 모델로 다시 맞춘다 (추적 여부가 경계에 걸려 학습 여부를 알 수 없을 때만)
+    local function resyncLearned()
+        learned = {}
+        for key, names in pairs(ns.db.passes) do
+            learned[key] = { unpack(names) }
+        end
+    end
 
     local function expire()
         if model and model.state == "pending" then
@@ -131,6 +177,38 @@ local function runOnce(seed)
         elseif not (model and model.ambiguous) and flight and flight.state == "flying" then
             fail("모델은 추적하지 않는데 애드온은 비행으로 추적함")
         end
+
+        -- 경유지 목록(정류장 + 지나가는 지역)이 모델과 같아야 한다
+        if model and model.state == "flying" and not model.ambiguous and flight and flight.path then
+            local got, want = {}, {}
+            for i, stop in ipairs(flight.path.stops) do got[i] = stop.name .. (stop.pass and "*" or "") end
+            for i, point in ipairs(model.points) do want[i] = point.name .. (point.hop and "*" or "") end
+            got, want = table.concat(got, " → "), table.concat(want, " → ")
+            if got ~= want then
+                fail(format("경유지 목록 불일치:\n  모델   %s\n  애드온 %s", want, got))
+            end
+        end
+
+        -- 학습한 지나가는 지역은 모델과 같고, 구간마다 중복이 없고, 정류장 지역·이름은 들어가지 않는다
+        if not (model and model.ambiguous) then
+            local want, got = serialize(learned), serialize(ns.db.passes)
+            if want ~= got then
+                fail(format("학습 불일치:\n  모델   %s\n  애드온 %s", want, got))
+            end
+        end
+        for key, names in pairs(ns.db.passes) do
+            local from, to = key:match("^(.-)>(.*)$")
+            local seen = {}
+            for _, name in ipairs(names) do
+                if seen[name] then fail(format("학습 목록에 중복: %s %s", key, name)) end
+                seen[name] = true
+                for _, stop in ipairs({ stopByKey[from], stopByKey[to] }) do
+                    if stop.zone == name or stop.name == name then
+                        fail(format("구간 정류장의 지역이 학습됨: %s %s", key, name))
+                    end
+                end
+            end
+        end
     end
 
     local function snapshot()
@@ -147,11 +225,13 @@ local function runOnce(seed)
         game:openTaxiMap(fixtures.kalimdor())
         game:call("TakeTaxiNode", dest)
         game:closeTaxiMap()
-        model = { state = "pending", dest = dest, at = game.now, expected = ns.db.routes[routes[dest]] }
+        model = { state = "pending", dest = dest, at = game.now, expected = ns.db.routes[routes[dest]],
+            points = buildPoints(dest) }
         lastStop = nil
     end
 
     -- 경과 시간 비율로 추정한 정류장 (경과 시간 elapsed 기준)
+    -- 지나가는 지역은 구간 안쪽에 있으므로 시간 추정은 정류장만으로 해도 같은 구간이 나온다
     local function stopByTime(path, elapsed)
         if model.expected - elapsed <= ARRIVAL_LEAD then
             return #path.at
@@ -170,7 +250,9 @@ local function runOnce(seed)
         local count = #path.at
 
         local function at(elapsed)
-            local current = model.anchor
+            -- 기준점이 지나가는 지역이면 그 구간의 시작 정류장에 있는 셈이다
+            local point = model.anchor and model.points[model.anchor]
+            local current = point and (point.stop or point.hop)
             if model.expected and model.expected > 0 then
                 current = math.max(current or 1, stopByTime(path, elapsed))
             end
@@ -241,6 +323,9 @@ local function runOnce(seed)
         if ns.GetFlight() then
             fail("착륙 후에도 추적 상태가 남음")
         end
+        if model and model.ambiguous then
+            resyncLearned()
+        end
         model = nil
         lastStop = nil
     end
@@ -290,8 +375,16 @@ local function runOnce(seed)
             model.ambiguous = true
             return
         end
-        if flight and not model.ambiguous and flight.landing ~= landing then
-            fail(format("착륙 지점 불일치: 모델 %s, 애드온 %s", tostring(landing), tostring(flight.landing)))
+        if flight and not model.ambiguous then
+            local stop = flight.landing and flight.path.stops[flight.landing]
+            if stop and stop.pass then
+                fail("지나가는 지역에 착륙 예정: " .. stop.name)
+            end
+            local name = stop and stop.name or nil
+            local expected = landing and PATHS[model.dest].stops[landing].name or nil
+            if name ~= expected then
+                fail(format("착륙 지점 불일치: 모델 %s, 애드온 %s", tostring(expected), tostring(name)))
+            end
         end
         if landing ~= #PATHS[model.dest].at then
             model.interrupted = model.interrupted or "조기 착륙"
@@ -299,20 +392,59 @@ local function runOnce(seed)
     end
 
     function actions.zone()
-        game.zone = pick(ZONES)
-        note("지역 변경 %s", game.zone)
-        game:fire("ZONE_CHANGED_NEW_AREA")
+        local zone = pick(ZONES)
+        note("지역 변경 %s", zone)
+        game:enterZone(zone)
 
-        -- 지역이 바뀌면 앞으로 남은 정류장 중 그 지역의 첫 정류장으로 기준점을 옮긴다 (뒤로는 안 감)
-        if model and model.state == "flying" then
-            local zones = PATHS[model.dest].zones
-            for i = (model.anchor or 1) + 1, #zones do
-                if zones[i] == game.zone then
-                    model.anchor = i
-                    break
+        if not (model and model.state == "flying") then return end
+        local points = model.points
+
+        -- 지나가는 지역을 5초 이상 머문 뒤 벗어나면 그 구간에 학습한다 (구간 안 순서대로)
+        local pending = model.pending
+        model.pending = nil
+        if pending and game.now - pending.since >= MIN_PASS_DWELL then
+            pending.point.learned = true
+            local path, names = PATHS[model.dest], {}
+            for _, point in ipairs(points) do
+                if point.hop == pending.point.hop and point.learned then
+                    names[#names + 1] = point.name
                 end
             end
+            learned[hopKey(path, pending.point.hop)] = #names > 0 and names or nil
         end
+
+        local function isZone(point)
+            return point.zone == zone or point.name == zone
+        end
+        local function stay(index)
+            local point = points[index]
+            if point.hop and not point.learned then
+                model.pending = { point = point, since = game.now }
+            end
+        end
+
+        -- 앞으로 남은 곳이면 기준점을 옮기고, 이미 지난 곳이면 무시 (뒤로는 안 감)
+        local anchor = model.anchor or 1
+        for i = anchor + 1, #points do
+            if isZone(points[i]) then
+                model.anchor = i
+                stay(i)
+                return
+            end
+        end
+        for i = anchor, 1, -1 do
+            if isZone(points[i]) then
+                if i == anchor then stay(i) end
+                return
+            end
+        end
+
+        -- 처음 보는 지역: 목적지가 아니면 기준점 바로 뒤에 지나가는 지역으로 끼워 넣는다
+        local here = points[anchor]
+        if here.stop == #PATHS[model.dest].stops then return end
+        table.insert(points, anchor + 1, { name = zone, zone = zone, hop = here.stop or here.hop })
+        model.anchor = anchor + 1
+        stay(anchor + 1)
     end
 
     function actions.slash()
@@ -343,7 +475,7 @@ local function runOnce(seed)
 
     function actions.hoverTimer()
         note("타이머 창 툴팁")
-        local frame = timerFrame(game)
+        local frame = game:timerFrame()
         frame.scripts.OnEnter(frame)
         game:advance(0.6, STEP)
         frame.scripts.OnLeave(frame)
@@ -351,7 +483,7 @@ local function runOnce(seed)
     end
 
     function actions.wait()
-        local seconds = pick({ 0.1, 0.5, 1, 3, 9, 10, 11, 30, 90 }) + math.random()
+        local seconds = pick({ 0.1, 0.5, 1, 3, 4, 5, 9, 10, 11, 30, 90 }) + math.random()
         note("대기 %.2f초", seconds)
         wait(seconds)
     end

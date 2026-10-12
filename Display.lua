@@ -94,6 +94,11 @@ local function addRow(label, value, dim)
     end
 end
 
+-- 경유지 줄에서 내릴 수 있는 정류장은 밝게, 내리지 않고 지나가는 지역은 기본(흐린) 색으로
+local function stopName(stop)
+    return stop and (stop.pass and stop.name or "|cffd0d0d0" .. stop.name .. "|r")
+end
+
 local function addStops(f)
     local stops = f.path and f.path.stops
     -- 정류장이 둘뿐이면 직항이라 경유지 표시가 의미 없다
@@ -107,15 +112,15 @@ local function addStops(f)
     if current then
         addRow("경유지", format("%d / %d", current, count))
         GameTooltip:AddLine(format("%s  →  |cffffffff%s|r  →  %s",
-            current > 1 and stops[current - 1].name or "출발",
+            stopName(stops[current - 1]) or "출발",
             stops[current].name,
-            current < count and stops[current + 1].name or "도착"),
+            stopName(stops[current + 1]) or "도착"),
             DIM_R, DIM_G, DIM_B)
     else
         addRow("경유지", format("? / %d", count), true)
         local names = {}
         for i, stop in ipairs(stops) do
-            names[i] = stop.name
+            names[i] = stopName(stop)
         end
         GameTooltip:AddLine(table.concat(names, " → "), DIM_R, DIM_G, DIM_B, true)
     end

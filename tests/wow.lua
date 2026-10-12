@@ -221,6 +221,20 @@ function Game:closeTaxiMap()
     self.taxi = nil
 end
 
+function Game:enterZone(zone)
+    self.zone = zone
+    self:fire("ZONE_CHANGED_NEW_AREA")
+end
+
+-- 타이머 창 프레임 (OnEnter 스크립트가 있는 프레임)
+function Game:timerFrame()
+    for _, frame in ipairs(self.frames) do
+        if frame.scripts.OnEnter then
+            return frame
+        end
+    end
+end
+
 -- 대화창을 열고 선택지를 고른다 (Blizzard 대화창처럼 orderIndex 로 선택)
 function Game:selectGossip(gossip, index)
     self.gossip = gossip

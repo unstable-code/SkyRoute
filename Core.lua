@@ -10,6 +10,8 @@ local DEFAULTS = {
     },
     -- 경로 키("출발>도착") → 마지막으로 측정된 소요 시간(초)
     routes = {},
+    -- 구간 키("정류장>다음 정류장") → 그 사이에 내리지 않고 지나가는 지역 이름 목록 (비행하며 학습)
+    passes = {},
 }
 
 local function fillDefaults(target, defaults)
@@ -66,6 +68,14 @@ end
 
 function ns.SetDuration(fromKey, toKey, seconds)
     ns.db.routes[routeKey(fromKey, toKey)] = seconds
+end
+
+function ns.GetPasses(fromKey, toKey)
+    return ns.db.passes[routeKey(fromKey, toKey)]
+end
+
+function ns.SetPasses(fromKey, toKey, names)
+    ns.db.passes[routeKey(fromKey, toKey)] = #names > 0 and names or nil
 end
 
 
